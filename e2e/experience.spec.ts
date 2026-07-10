@@ -185,6 +185,8 @@ test.describe("desktop portrait experience", () => {
       page.getByRole("img", { name: /^Living abstract portrait:/ }),
     ).toHaveCount(2);
     await expect(page.locator(".compare-portrait")).toHaveCount(2);
+    const titles = await page.locator(".compare-portrait h3").allTextContents();
+    expect(new Set(titles).size).toBe(2);
     await expect(page.getByText(/Neither is a score|distinct history/)).toBeVisible();
     await expect(page.getByRole("button", { name: "Back to portrait" })).toBeEnabled();
     await expect(page.getByRole("button", { name: "Clear both" })).toBeEnabled();

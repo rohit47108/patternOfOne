@@ -194,7 +194,7 @@ export function generatePortraitTitle(
   const candidates = titleCandidates(metrics);
   candidates.sort((left, right) => {
     const scoreDifference = right.score - left.score;
-    if (Math.abs(scoreDifference) > 0.015) return scoreDifference;
+    if (Math.abs(scoreDifference) > 0.005) return scoreDifference;
     const leftTie = mixSeed(seed, left.title);
     const rightTie = mixSeed(seed, right.title);
     return leftTie - rightTie;

@@ -84,4 +84,11 @@ describe("deterministic demo participants", () => {
     expect(kinetic.finalParams.energy).toBeGreaterThan(measured.finalParams.energy);
     expect(kinetic.motifs).not.toEqual(measured.motifs);
   });
+
+  it("keeps the full-length contrast demo semantically distinct", () => {
+    const [measured, kinetic] = simulateContrastingSessions(0x50a77e, 90_000, 220);
+    expect(measured.title).toBe("Moving Through Stillness");
+    expect(kinetic.title).toBe("A Gesture Widening");
+    expect(new Set([measured.title, kinetic.title]).size).toBe(2);
+  });
 });
