@@ -6,7 +6,7 @@ Pattern of One is a browser-based interactive artwork that builds a temporary ab
 
 The portrait is an artistic interpretation. It does not identify a participant, recognize faces, classify emotions, diagnose health, or describe personality.
 
-> Deployment status: the application is ready to run locally and deploy as a Next.js project, but this README does not claim a production URL that has not been deployed and verified.
+> Live production: [patternofone.vercel.app](https://patternofone.vercel.app) — deployed from this repository and browser-verified on July 10, 2026.
 
 ## Concept
 
@@ -305,7 +305,7 @@ After deployment, verify:
 - replay, comparison, PNG export, and stored-record clearing;
 - reduced motion, mobile layout, console errors, and stopped device indicators after reset.
 
-A production URL should be added here only after the final alias resolves and these checks pass.
+The primary production alias is [patternofone.vercel.app](https://patternofone.vercel.app). Deterministic judging routes can be opened by adding <code>?demo=measured</code>, <code>?demo=kinetic</code>, or <code>?demo=contrast</code> to that URL.
 
 ## Project structure
 
