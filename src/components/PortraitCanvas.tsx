@@ -13,6 +13,10 @@ import type {
   ExperienceStage,
   Motif,
 } from "@/src/lib/types";
+import {
+  CALIBRATION_DURATION_MS,
+  FORMATION_DURATION_MS,
+} from "@/src/lib/timing";
 
 export interface PortraitCanvasHandle {
   canvas: HTMLCanvasElement | null;
@@ -49,6 +53,18 @@ interface TrailPoint {
 }
 
 const TAU = Math.PI * 2;
+const ARTISTIC_KEYS: Array<keyof ArtisticParameters> = [
+  "energy",
+  "expansion",
+  "rhythm",
+  "continuity",
+  "symmetry",
+  "volatility",
+  "density",
+  "memory",
+  "silence",
+  "illumination",
+];
 
 function mulberry32(seed: number) {
   let value = seed >>> 0;
@@ -65,8 +81,17 @@ function clamp(value: number, min = 0, max = 1) {
   return Math.min(max, Math.max(min, value));
 }
 
+function mix(from: number, to: number, amount: number) {
+  return from + (to - from) * amount;
+}
+
 function particleCount(quality: EffectiveQuality, compact: boolean) {
-  if (quality === "low" || compact) return 220;
+  if (compact) {
+    if (quality === "low") return 150;
+    if (quality === "balanced") return 230;
+    return 320;
+  }
+  if (quality === "low") return 220;
   if (quality === "balanced") return 390;
   return 640;
 }
@@ -86,8 +111,12 @@ function createParticles(seed: number, count: number): Particle[] {
 function stageEnvelope(stage: ExperienceStage, elapsed: number) {
   if (stage === "attract") return 0.7;
   if (stage === "consent") return 0.76;
-  if (stage === "calibration") return clamp(0.66 + elapsed / 13_000, 0.66, 0.98);
-  if (stage === "forming") return 1.02 + Math.sin(elapsed * 0.0011) * 0.03;
+  if (stage === "calibration") {
+    return 0.66 + clamp(elapsed / CALIBRATION_DURATION_MS) * 0.32;
+  }
+  if (stage === "forming") {
+    return 0.88 + clamp(elapsed / FORMATION_DURATION_MS) * 0.14 + Math.sin(elapsed * 0.0011) * 0.02;
+  }
   if (stage === "resetting") return Math.max(0.04, 1 - elapsed / 1250);
   return 1;
 }
@@ -182,6 +211,9 @@ export const PortraitCanvas = forwardRef<PortraitCanvasHandle, PortraitCanvasPro
       let frameCounter = 0;
       let frameWindowStarted = lastFrame;
       let lastTrailSample = 0;
+      const smoothedParams = { ...propsRef.current.params };
+      let pointerX = 0;
+      let pointerY = 0;
 
       const resize = () => {
         const rect = canvas.getBoundingClientRect();
@@ -190,7 +222,8 @@ export const PortraitCanvas = forwardRef<PortraitCanvasHandle, PortraitCanvasPro
         const compact = width < 700;
         const tier = propsRef.current.quality;
         const cap = tier === "high" ? 1.75 : tier === "balanced" ? 1.5 : 1;
-        dpr = Math.min(window.devicePixelRatio || 1, compact ? Math.min(cap, 1.25) : cap);
+        const compactCap = tier === "high" ? 1.5 : tier === "balanced" ? 1.25 : 1;
+        dpr = Math.min(window.devicePixelRatio || 1, compact ? compactCap : cap);
         const pixelWidth = Math.round(width * dpr);
         const pixelHeight = Math.round(height * dpr);
         if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
@@ -198,7 +231,12 @@ export const PortraitCanvas = forwardRef<PortraitCanvasHandle, PortraitCanvasPro
           canvas.height = pixelHeight;
         }
         context.setTransform(dpr, 0, 0, dpr, 0, 0);
+        context.lineCap = "round";
+        context.lineJoin = "round";
         particles = createParticles(seed, particleCount(tier, compact));
+        trailsRef.current.forEach((trail) => {
+          trail.length = 0;
+        });
       };
 
       const observer = new ResizeObserver(resize);
@@ -285,6 +323,7 @@ export const PortraitCanvas = forwardRef<PortraitCanvasHandle, PortraitCanvasPro
         radius: number,
         artistic: ArtisticParameters,
         hue: number,
+        delta: number,
       ) => {
         if (now - lastTrailSample > 85 && artistic.energy > 0.24) {
           lastTrailSample = now;
@@ -301,14 +340,20 @@ export const PortraitCanvas = forwardRef<PortraitCanvasHandle, PortraitCanvasPro
 
         trailsRef.current.forEach((trail, index) => {
           if (trail.length < 2) return;
+          const decay = Math.pow(0.987, delta / 16.67);
+          trail.forEach((point) => {
+            point.life *= decay;
+          });
+          while (trail[0]?.life < 0.035) trail.shift();
+          if (trail.length < 2) return;
           context.beginPath();
           trail.forEach((point, pointIndex) => {
-            point.life *= 0.992;
             if (pointIndex === 0) context.moveTo(point.x, point.y);
             else context.lineTo(point.x, point.y);
           });
+          const life = trail.reduce((sum, point) => sum + point.life, 0) / trail.length;
           context.strokeStyle = `hsla(${(hue + 18 + index * 5) % 360}, 76%, 70%, ${
-            0.05 + artistic.energy * 0.13
+            (0.035 + artistic.energy * 0.12) * life
           })`;
           context.lineWidth = 0.6 + artistic.energy;
           context.stroke();
@@ -328,18 +373,25 @@ export const PortraitCanvas = forwardRef<PortraitCanvasHandle, PortraitCanvasPro
         }
 
         const current = propsRef.current;
-        const artistic = current.params;
+        const smoothing = 1 - Math.exp(-delta / (current.reducedMotion ? 720 : 230));
+        for (const key of ARTISTIC_KEYS) {
+          smoothedParams[key] = mix(smoothedParams[key], current.params[key], smoothing);
+        }
+        const artistic = smoothedParams;
         const elapsed = now - enteredAtRef.current;
         const envelope = stageEnvelope(current.stage, elapsed);
         const motionScale = current.reducedMotion ? 0.18 : 1;
         const shortSide = Math.min(width, height);
         const baseRadius = shortSide * (0.22 + artistic.expansion * 0.22) * envelope;
         const pointer = pointerRef.current;
+        const pointerSmoothing = 1 - Math.exp(-delta / 150);
+        pointerX = mix(pointerX, pointer.active ? pointer.x : 0, pointerSmoothing);
+        pointerY = mix(pointerY, pointer.active ? pointer.y : 0, pointerSmoothing);
         const offsetLimit = shortSide * 0.055;
         const posterStage = current.stage === "attract" || current.stage === "consent";
-        const centerX = width * (posterStage && width > 720 ? 0.72 : 0.56) + (pointer.active ? pointer.x * offsetLimit : 0);
+        const centerX = width * (posterStage && width > 720 ? 0.72 : 0.56) + pointerX * offsetLimit;
         const mobileConsent = current.stage === "consent" && width < 720;
-        const centerY = height * (mobileConsent ? 0.28 : 0.49) + (pointer.active ? pointer.y * offsetLimit : 0);
+        const centerY = height * (mobileConsent ? 0.28 : 0.49) + pointerY * offsetLimit;
         const hue = current.accentHue;
 
         const backdrop = context.createRadialGradient(centerX, centerY, 0, centerX, centerY, shortSide * 0.72);
@@ -358,7 +410,7 @@ export const PortraitCanvas = forwardRef<PortraitCanvasHandle, PortraitCanvasPro
 
         drawFilaments(now, centerX, centerY, baseRadius, artistic, hue, envelope);
 
-        const speed = (0.00016 + artistic.energy * 0.00055) * motionScale;
+        const speed = (0.0003 + artistic.energy * 0.00078) * motionScale;
         const silenceCompression = 1 - artistic.silence * 0.1;
         const pixelSize = current.quality === "low" ? 1.25 : 1;
         particles.forEach((particle, index) => {
@@ -380,8 +432,16 @@ export const PortraitCanvas = forwardRef<PortraitCanvasHandle, PortraitCanvasPro
           const light = 58 + particle.depth * 24 + artistic.illumination * 7;
           context.fillStyle = `hsla(${(hue + particle.depth * 36 - 12) % 360}, ${52 + artistic.volatility * 25}%, ${light}%, ${alpha})`;
           const size = particle.size * pixelSize * (0.95 + artistic.density * 0.85);
-          if (index % 9 === 0 && current.quality !== "low") {
-            context.fillRect(x, y, size * 1.45, size * 0.55);
+          if (index % 11 === 0 && current.quality !== "low") {
+            context.beginPath();
+            context.moveTo(x, y);
+            context.lineTo(
+              x - Math.cos(angle) * size * (1.8 + artistic.energy * 2.2),
+              y - Math.sin(angle) * size * (1.2 + artistic.energy * 1.5),
+            );
+            context.strokeStyle = context.fillStyle;
+            context.lineWidth = Math.max(0.55, size * 0.7);
+            context.stroke();
           } else {
             context.beginPath();
             context.arc(x, y, size, 0, TAU);
@@ -389,7 +449,7 @@ export const PortraitCanvas = forwardRef<PortraitCanvasHandle, PortraitCanvasPro
           }
         });
 
-        updateAndDrawTrails(now, centerX, centerY, baseRadius, artistic, hue);
+        updateAndDrawTrails(now, centerX, centerY, baseRadius, artistic, hue, delta);
         drawMotifs(now, centerX, centerY, baseRadius, hue, envelope);
 
         if (artistic.rhythm > 0.15) {
@@ -430,7 +490,7 @@ export const PortraitCanvas = forwardRef<PortraitCanvasHandle, PortraitCanvasPro
         observer.disconnect();
         if (animationFrame) cancelAnimationFrame(animationFrame);
       };
-    }, [onFrameRate, seed]);
+    }, [onFrameRate, quality, seed]);
 
     const handlePointerMove = (event: ReactPointerEvent<HTMLCanvasElement>) => {
       if (!interactive) return;
@@ -446,6 +506,7 @@ export const PortraitCanvas = forwardRef<PortraitCanvasHandle, PortraitCanvasPro
       <canvas
         ref={canvasRef}
         className={className}
+        data-quality={quality}
         aria-label={label}
         role="img"
         onPointerMove={handlePointerMove}

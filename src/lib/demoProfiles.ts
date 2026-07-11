@@ -1,9 +1,11 @@
 import { createSeededRandom, mixSeed } from "./random";
 import { PortraitSessionEngine } from "./session";
+import { CAPTURE_DURATION_MS } from "./timing";
 import type { DemoProfileName, RawSignals, SessionRecord } from "./types";
 
 export const DEFAULT_DEMO_SEED = 0x50a77e;
-export const DEFAULT_DEMO_DURATION_MS = 90_000;
+/** Signal capture is 2s calibration + 15s prompts; formation is UI-only. */
+export const DEFAULT_DEMO_DURATION_MS = CAPTURE_DURATION_MS;
 export const DEFAULT_DEMO_FRAME_INTERVAL_MS = 100;
 
 function clamp01(value: number): number {

@@ -19,7 +19,16 @@ import {
   saveSession,
 } from "@/src/lib/session";
 import { MediaSensorController } from "@/src/lib/media";
-import { SoundscapeController } from "@/src/lib/soundscape";
+import {
+  SoundscapeController,
+  type SoundscapeStatus,
+} from "@/src/lib/soundscape";
+import {
+  CALIBRATION_DURATION_MS,
+  CAPTURE_DURATION_MS,
+  FORMATION_DURATION_MS,
+  PROMPT_DURATION_SECONDS,
+} from "@/src/lib/timing";
 import type {
   DemoChoice,
   DemoProfileName,
@@ -36,15 +45,30 @@ import type {
 import { NEUTRAL_PARAMS, NEUTRAL_SIGNALS } from "@/src/lib/types";
 
 const PROMPTS: PromptDefinition[] = [
-  { label: "Presence", text: "Introduce yourself without saying your name.", duration: 27 },
-  { label: "Memory", text: "Describe a place you can still picture clearly.", duration: 27 },
-  { label: "Gesture", text: "Show the portrait something words cannot.", duration: 27 },
+  { label: "Presence", text: "Introduce yourself without saying your name.", duration: PROMPT_DURATION_SECONDS },
+  { label: "Memory", text: "Describe a place you can still picture clearly.", duration: PROMPT_DURATION_SECONDS },
+  { label: "Gesture", text: "Show the portrait something words cannot.", duration: PROMPT_DURATION_SECONDS },
 ];
 
 const INITIAL_STATUS: SensorStatus = {
   camera: "idle",
   microphone: "idle",
   pose: "idle",
+};
+
+const INITIAL_SOUND_STATUS: SoundscapeStatus = {
+  state: "idle",
+  muted: true,
+  volume: 0.58,
+  message: "Sound waits for a participant gesture.",
+};
+
+const FLOW_PROGRESS: Partial<Record<ExperienceStage, { step: number; label: string }>> = {
+  consent: { step: 1, label: "Choose input" },
+  calibration: { step: 2, label: "Find a baseline" },
+  session: { step: 3, label: "Three prompts" },
+  forming: { step: 4, label: "Form the portrait" },
+  reveal: { step: 5, label: "Portrait ready" },
 };
 
 const STAGE_LABELS: Record<ExperienceStage, string> = {
@@ -78,8 +102,12 @@ function secondsLabel(seconds: number) {
   return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, "0")}`;
 }
 
-function statusHasError(status: SensorStatus) {
-  return [status.camera, status.microphone, status.pose].some((value) => value === "denied" || value === "error");
+function statusHasError(status: SensorStatus, mode: InputMode) {
+  const cameraProblem = ["denied", "unavailable", "error"].includes(status.camera);
+  const microphoneProblem =
+    mode === "full" &&
+    ["suspended", "denied", "unavailable", "error"].includes(status.microphone);
+  return cameraProblem || microphoneProblem || status.pose === "error";
 }
 
 function hasActionableSensorGuidance(status: SensorStatus) {
@@ -88,11 +116,19 @@ function hasActionableSensorGuidance(status: SensorStatus) {
 
 function sensorNoticeHeading(status: SensorStatus) {
   if (status.camera === "denied") return "Camera access is unavailable.";
+  if (status.camera === "unavailable") return "No camera is available.";
+  if (status.microphone === "suspended") return "The microphone is waiting for the browser.";
+  if (status.microphone === "denied") return "Microphone access is unavailable.";
+  if (status.microphone === "unavailable") return "No microphone is available.";
   if (/more than one body/i.test(status.message ?? "")) return "The portrait found more than one participant.";
   if (/very dark/i.test(status.message ?? "")) return "The portrait needs a little more light.";
   if (/background sound/i.test(status.message ?? "")) return "The room sound is strong.";
   if (/cannot see/i.test(status.message ?? "")) return "The portrait cannot see enough movement yet.";
   return "A sensor became unavailable.";
+}
+
+function hasUsableSensor(status: SensorStatus) {
+  return status.camera === "ready" || status.microphone === "ready";
 }
 
 function qualityForDevice(): EffectiveQuality {
@@ -122,13 +158,14 @@ export function Experience() {
   const [autoQuality, setAutoQuality] = useState<EffectiveQuality>("balanced");
   const [fps, setFps] = useState(60);
   const [reducedMotion, setReducedMotion] = useState(false);
-  const [soundOn, setSoundOn] = useState(false);
+  const [soundStatus, setSoundStatus] = useState<SoundscapeStatus>(INITIAL_SOUND_STATUS);
   const [infoOpen, setInfoOpen] = useState(false);
   const [debug, setDebug] = useState(false);
   const [noticeDismissed, setNoticeDismissed] = useState(false);
   const [replaying, setReplaying] = useState(false);
   const [replayProgress, setReplayProgress] = useState(0);
   const [exportMessage, setExportMessage] = useState("");
+  const [qualityMessage, setQualityMessage] = useState("");
 
   const canvasRef = useRef<PortraitCanvasHandle>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -140,16 +177,49 @@ export function Experience() {
   const sessionTimerRef = useRef<number | null>(null);
   const formationTimerRef = useRef<number | null>(null);
   const replayTimerRef = useRef<number | null>(null);
+  const qualityTimerRef = useRef<number | null>(null);
   const demoStartedAtRef = useRef(0);
   const sessionStartedAtRef = useRef(0);
   const speedRef = useRef(1);
   const autoStartedRef = useRef(false);
+  const captureTokenRef = useRef(0);
+  const slowFrameSamplesRef = useRef(0);
+  const fastFrameSamplesRef = useRef(0);
   const previousStageRef = useRef<ExperienceStage>(stage);
   const mediaRef = useRef<MediaSensorController | null>(null);
   const soundscapeRef = useRef<SoundscapeController | null>(null);
 
   const accentHue = currentSession?.accentHue ?? accentHueForSeed(seed);
   const effectiveQuality = quality === "auto" ? autoQuality : quality;
+  const soundOn =
+    soundStatus.state === "ready" && !soundStatus.muted && soundStatus.volume > 0.01;
+  const soundLabel =
+    soundStatus.state === "starting"
+      ? "Sound starting"
+      : soundStatus.state === "suspended"
+        ? "Resume sound"
+      : soundStatus.state === "unavailable" || soundStatus.state === "error"
+        ? "Sound unavailable"
+        : soundOn
+          ? "Sound on"
+          : "Sound off";
+  const flowProgress = FLOW_PROGRESS[stage];
+  const sessionSensorLabel =
+    inputMode === "demo"
+      ? `${demoProfile} demo · simulated movement and sound`
+      : inputMode === "movement"
+        ? `movement ${sensorStatus.camera}`
+        : `movement ${sensorStatus.camera} · sound ${sensorStatus.microphone}`;
+  const sessionStatusState =
+    inputMode === "demo"
+      ? "active"
+      : sensorStatus.camera === "loading" || sensorStatus.microphone === "loading" || sensorStatus.microphone === "suspended"
+        ? "connecting"
+        : statusHasError(sensorStatus, inputMode)
+          ? hasUsableSensor(sensorStatus)
+            ? "degraded"
+            : "error"
+          : "active";
   const totalDuration = sessionDuration();
   const promptIndex = Math.min(
     PROMPTS.length - 1,
@@ -199,7 +269,7 @@ export function Experience() {
       formationTimerRef.current = window.setInterval(() => {
         clearTimer(formationTimerRef);
         setStage(revealStage);
-      }, Math.max(900, 4800 / speedRef.current));
+      }, Math.max(600, FORMATION_DURATION_MS / speedRef.current));
     },
     [clearTimer],
   );
@@ -233,9 +303,22 @@ export function Experience() {
     }, 100);
   }, [beginFormation, clearTimer, totalDuration]);
 
+  const beginCalibrationClock = useCallback(() => {
+    clearTimer(calibrationTimerRef);
+    const calibrationStartedAt = performance.now();
+    calibrationTimerRef.current = window.setInterval(() => {
+      const progress =
+        ((performance.now() - calibrationStartedAt) / CALIBRATION_DURATION_MS) *
+        speedRef.current;
+      setCalibrationProgress(Math.min(1, progress));
+      if (progress >= 1) enterGuidedSession();
+    }, 70);
+  }, [clearTimer, enterGuidedSession]);
+
   const startCalibration = useCallback(
     (mode: InputMode, profile: DemoProfileName, sessionSeed = newSeed()) => {
       stopTimedWork();
+      const captureToken = ++captureTokenRef.current;
       setSeed(sessionSeed);
       setInputMode(mode);
       inputModeRef.current = mode;
@@ -268,30 +351,29 @@ export function Experience() {
           const elapsed = (performance.now() - demoStartedAtRef.current) * speedRef.current;
           processSignals(generateDemoSignals(profile, elapsed, sessionSeed));
         }, 80);
+        beginCalibrationClock();
       } else {
         const controller = mediaRef.current;
         if (controller) {
           controller.attachVideoElement(videoRef.current);
           void controller.start(mode).then((result) => {
+            if (captureToken !== captureTokenRef.current) return;
             setSensorStatus(result.status);
-            if (!result.hasLiveInput) setNoticeDismissed(false);
+            if (result.hasLiveInput) beginCalibrationClock();
+            else setNoticeDismissed(false);
           });
+        } else {
+          beginCalibrationClock();
         }
       }
-
-      const calibrationStartedAt = performance.now();
-      calibrationTimerRef.current = window.setInterval(() => {
-        const progress = ((performance.now() - calibrationStartedAt) / 4200) * speedRef.current;
-        setCalibrationProgress(Math.min(1, progress));
-        if (progress >= 1) enterGuidedSession();
-      }, 90);
     },
-    [enterGuidedSession, processSignals, stopTimedWork],
+    [beginCalibrationClock, processSignals, stopTimedWork],
   );
 
   const startContrast = useCallback(
     (sessionSeed = newSeed()) => {
       stopTimedWork();
+      captureTokenRef.current += 1;
       void mediaRef.current?.stop();
       setSeed(sessionSeed);
       setInputMode("demo");
@@ -303,7 +385,7 @@ export function Experience() {
         pose: "fallback",
         message: "Two deterministic signal profiles are using the live portrait pipeline.",
       });
-      const pair = simulateContrastingSessions(sessionSeed, 90_000, 220);
+      const pair = simulateContrastingSessions(sessionSeed, CAPTURE_DURATION_MS, 100);
       const stored = [saveSession(pair[0]), saveSession(pair[1])];
       void stored;
       setSessions([pair[0], pair[1]]);
@@ -314,7 +396,7 @@ export function Experience() {
       formationTimerRef.current = window.setInterval(() => {
         clearTimer(formationTimerRef);
         setStage("compare");
-      }, Math.max(900, 4800 / speedRef.current));
+      }, Math.max(600, FORMATION_DURATION_MS / speedRef.current));
     },
     [clearTimer, stopTimedWork],
   );
@@ -327,12 +409,35 @@ export function Experience() {
     [startCalibration, startContrast],
   );
 
+  const cancelCapture = useCallback(() => {
+    captureTokenRef.current += 1;
+    stopTimedWork();
+    void mediaRef.current?.stop();
+    setCurrentSession(null);
+    setCalibrationProgress(0);
+    setSessionElapsed(0);
+    setSignals(initialNormalized());
+    setParams({ ...NEUTRAL_PARAMS });
+    setMotifs([]);
+    setSensorStatus(INITIAL_STATUS);
+    setNoticeDismissed(false);
+    setStage("consent");
+  }, [stopTimedWork]);
+
+  const retryCurrentInput = useCallback(() => {
+    if (sensorStatus.microphone === "suspended" && sensorStatus.camera === "ready") {
+      void mediaRef.current?.resumeAudio();
+      return;
+    }
+    startCalibration(inputModeRef.current, profileRef.current);
+  }, [sensorStatus.camera, sensorStatus.microphone, startCalibration]);
+
   const resetVisualState = useCallback(
     (preserveSessions: boolean) => {
+      captureTokenRef.current += 1;
       stopTimedWork();
       void mediaRef.current?.stop();
       void soundscapeRef.current?.stop();
-      setSoundOn(false);
       setStage("resetting");
       setReplaying(false);
       setReplayProgress(0);
@@ -400,40 +505,97 @@ export function Experience() {
 
   const toggleSound = useCallback(() => {
     const controller = soundscapeRef.current;
-    if (!controller) return;
-    if (soundOn) {
+    if (!controller || soundStatus.state === "starting") return;
+    if (soundStatus.state === "ready" && !soundStatus.muted) {
       controller.setMuted(true);
-      setSoundOn(false);
       return;
     }
     controller.setMuted(false);
     void controller.start().then((started) => {
       if (!started) controller.setMuted(true);
-      setSoundOn(started);
     });
-  }, [soundOn]);
+  }, [soundStatus.muted, soundStatus.state]);
+
+  const setSoundVolume = useCallback((volume: number) => {
+    soundscapeRef.current?.setVolume(volume);
+  }, []);
+
+  const openInformation = useCallback(() => setInfoOpen(true), []);
+  const closeInformation = useCallback(() => setInfoOpen(false), []);
+  const backToAttract = useCallback(() => {
+    setDemoChooserOpen(false);
+    setStage("attract");
+  }, []);
+
+  const announceQuality = useCallback((message: string) => {
+    clearTimer(qualityTimerRef);
+    setQualityMessage(message);
+    qualityTimerRef.current = window.setTimeout(() => {
+      clearTimer(qualityTimerRef);
+      setQualityMessage("");
+    }, 2_400);
+  }, [clearTimer]);
+
+  const handleQualityChange = useCallback((nextQuality: QualityTier) => {
+    setQuality(nextQuality);
+    const effective = nextQuality === "auto" ? autoQuality : nextQuality;
+    announceQuality(
+      nextQuality === "auto"
+        ? `Automatic rendering is active at ${effective} quality.`
+        : `${effective[0].toUpperCase()}${effective.slice(1)} rendering is active.`,
+    );
+  }, [announceQuality, autoQuality]);
 
   const handleFrameRate = useCallback(
     (measuredFps: number) => {
       setFps(measuredFps);
-      if (quality !== "auto") return;
-      if (measuredFps < 34) setAutoQuality("low");
-      else if (measuredFps < 49) setAutoQuality("balanced");
+      if (quality !== "auto") {
+        slowFrameSamplesRef.current = 0;
+        fastFrameSamplesRef.current = 0;
+        return;
+      }
+
+      if (measuredFps < 38) {
+        slowFrameSamplesRef.current += 1;
+        fastFrameSamplesRef.current = 0;
+      } else if (measuredFps > 56) {
+        fastFrameSamplesRef.current += 1;
+        slowFrameSamplesRef.current = 0;
+      } else {
+        slowFrameSamplesRef.current = 0;
+        fastFrameSamplesRef.current = 0;
+      }
+
+      if (slowFrameSamplesRef.current >= 2) {
+        slowFrameSamplesRef.current = 0;
+        setAutoQuality((current) => {
+          const next = current === "high" ? "balanced" : "low";
+          if (next !== current) announceQuality(`Automatic rendering moved to ${next} quality.`);
+          return next;
+        });
+      } else if (fastFrameSamplesRef.current >= 4) {
+        fastFrameSamplesRef.current = 0;
+        setAutoQuality((current) => {
+          const next = current === "low" ? "balanced" : "high";
+          if (next !== current) announceQuality(`Automatic rendering recovered to ${next} quality.`);
+          return next;
+        });
+      }
     },
-    [quality],
+    [announceQuality, quality],
   );
 
   const debugStageChange = useCallback(
     (next: ExperienceStage) => {
       stopTimedWork();
       if ((next === "reveal" || next === "forming") && !currentSession) {
-        const record = simulateDemoSession(demoProfile, seed, 42_000, 180);
+        const record = simulateDemoSession(demoProfile, seed, CAPTURE_DURATION_MS, 100);
         setCurrentSession(record);
         setParams(record.finalParams);
         setMotifs(record.motifs);
       }
       if (next === "compare" && sessions.length < 2) {
-        const pair = simulateContrastingSessions(seed, 42_000, 200);
+        const pair = simulateContrastingSessions(seed, CAPTURE_DURATION_MS, 100);
         setSessions(pair);
       }
       setStage(next);
@@ -443,12 +605,13 @@ export function Experience() {
 
   useEffect(() => {
     const media = new MediaSensorController({ sampleRateHz: 16, poseRateHz: 9 });
-    const soundscape = new SoundscapeController({ muted: true, muteStorageKey: false, volume: 0.65 });
+    const soundscape = new SoundscapeController({ muted: true, volume: 0.58 });
     mediaRef.current = media;
     soundscapeRef.current = soundscape;
     media.attachVideoElement(videoRef.current);
     const unsubscribeSignals = media.subscribeSignals(processSignals);
     const unsubscribeStatus = media.subscribeStatus(setSensorStatus);
+    const unsubscribeSound = soundscape.subscribe(setSoundStatus);
 
     const motion = window.matchMedia("(prefers-reduced-motion: reduce)");
     const updateMotion = () => setReducedMotion(motion.matches);
@@ -482,14 +645,14 @@ export function Experience() {
       autoStartedRef.current = true;
       if (requestedPreview && validStages.includes(requestedPreview)) {
         if (requestedPreview === "reveal" || requestedPreview === "forming") {
-          const record = simulateDemoSession("measured", 0x50a77e, 42_000, 180);
+          const record = simulateDemoSession("measured", 0x50a77e, CAPTURE_DURATION_MS, 100);
           setCurrentSession(record);
           setParams(record.finalParams);
           setMotifs(record.motifs);
           setSessions([record]);
         }
         if (requestedPreview === "compare") {
-          const pair = simulateContrastingSessions(0x50a77e, 42_000, 200);
+          const pair = simulateContrastingSessions(0x50a77e, CAPTURE_DURATION_MS, 100);
           setSessions(pair);
           setCurrentSession(pair[1]);
         }
@@ -504,14 +667,16 @@ export function Experience() {
       window.clearTimeout(initializationTimer);
       motion.removeEventListener("change", updateMotion);
       stopTimedWork();
+      clearTimer(qualityTimerRef);
       unsubscribeSignals();
       unsubscribeStatus();
+      unsubscribeSound();
       void media.stop();
       void soundscape.stop();
       mediaRef.current = null;
       soundscapeRef.current = null;
     };
-  }, [processSignals, startCalibration, startContrast, stopTimedWork]);
+  }, [clearTimer, processSignals, startCalibration, startContrast, stopTimedWork]);
 
   useEffect(() => {
     inputModeRef.current = inputMode;
@@ -536,7 +701,8 @@ export function Experience() {
   }, [stage]);
 
   const showNotice =
-    (statusHasError(sensorStatus) || hasActionableSensorGuidance(sensorStatus)) &&
+    inputMode !== "demo" &&
+    (statusHasError(sensorStatus, inputMode) || hasActionableSensorGuidance(sensorStatus)) &&
     !noticeDismissed &&
     (stage === "calibration" || stage === "session");
 
@@ -563,31 +729,71 @@ export function Experience() {
 
       <header className="edge-bar">
         <span className="edge-wordmark">Pattern of One</span>
+        {flowProgress ? (
+          <span className="flow-progress" aria-label={`Stage ${flowProgress.step} of 5: ${flowProgress.label}`}>
+            <span>{String(flowProgress.step).padStart(2, "0")} / 05</span>
+            <span>{flowProgress.label}</span>
+          </span>
+        ) : null}
+        {stage === "consent" ? (
+          <button type="button" className="text-control stage-nav-control" data-testid="back-to-attract" onClick={backToAttract}>
+            Back
+          </button>
+        ) : null}
+        {stage === "calibration" || stage === "session" ? (
+          <button type="button" className="text-control stage-nav-control" data-testid="cancel-session" onClick={cancelCapture}>
+            Cancel
+          </button>
+        ) : null}
         {stage === "session" ? (
           <button type="button" className="text-control" onClick={finishPortrait}>
             Finish portrait
           </button>
         ) : null}
-        <button className="icon-control" type="button" aria-pressed={soundOn} onClick={toggleSound}>
+        <button
+          className="icon-control"
+          type="button"
+          aria-pressed={soundOn}
+          aria-label={soundLabel}
+          data-sound-state={soundStatus.state}
+          disabled={soundStatus.state === "starting"}
+          onClick={toggleSound}
+        >
           <span className="sound-glyph" aria-hidden="true"><i /><i /><i /></span>
-          <span className="control-label">Sound {soundOn ? "on" : "off"}</span>
+          <span className="control-label">{soundLabel}</span>
         </button>
-        <button className="text-control" type="button" onClick={() => setInfoOpen(true)} aria-haspopup="dialog">
-          <span className="control-label">About this work</span>
+        <button className="text-control" type="button" onClick={openInformation} aria-label="About this work" aria-haspopup="dialog">
+          <span className="control-label">About</span>
           <span className="info-glyph" aria-hidden="true">i</span>
         </button>
       </header>
 
       <p className="sr-only" aria-live="polite">{STAGE_LABELS[stage]}</p>
 
-      {showNotice ? (
-        <div className="error-notice" role="status">
-          <strong>{sensorNoticeHeading(sensorStatus)}</strong>
-          {sensorStatus.message ?? "The portrait can continue with the signals that remain, or switch to a deterministic demo."}
-          <div className="error-actions">
-            <button type="button" onClick={() => startCalibration("demo", "measured")}>Use demo mode</button>
-            <button type="button" onClick={() => setNoticeDismissed(true)}>Continue</button>
-          </div>
+      {(soundStatus.state === "starting" || soundStatus.state === "suspended" || soundStatus.state === "unavailable" || soundStatus.state === "error" || qualityMessage || showNotice) ? (
+        <div className="notice-stack">
+          {soundStatus.state === "starting" || soundStatus.state === "suspended" || soundStatus.state === "unavailable" || soundStatus.state === "error" ? (
+            <p className="sound-notice" role="status">{soundStatus.message}</p>
+          ) : null}
+          {qualityMessage ? <p className="quality-notice" role="status">{qualityMessage}</p> : null}
+          {showNotice ? (
+            <div className="error-notice" role="status">
+              <strong>{sensorNoticeHeading(sensorStatus)}</strong>
+              {sensorStatus.message ?? "The portrait can continue with the signals that remain, or switch to a deterministic demo."}
+              <div className="error-actions">
+                <button type="button" onClick={retryCurrentInput}>
+                  {sensorStatus.microphone === "suspended" ? "Retry sound" : "Retry devices"}
+                </button>
+                {inputMode === "full" && !hasUsableSensor(sensorStatus) ? (
+                  <button type="button" onClick={() => startCalibration("movement", "measured")}>Movement only</button>
+                ) : null}
+                <button type="button" onClick={() => startCalibration("demo", "measured")}>Use demo mode</button>
+                {hasUsableSensor(sensorStatus) ? (
+                  <button type="button" onClick={() => setNoticeDismissed(true)}>Continue</button>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
         </div>
       ) : null}
 
@@ -608,7 +814,7 @@ export function Experience() {
             <p className="eyebrow">Before the encounter</p>
             <h1 id="consent-title" data-stage-heading tabIndex={-1}>Your presence, not your likeness.</h1>
             <p className="consent-lede">
-              Choose what the portrait may observe. Permission is requested only after you select an option, and denial never ends the experience.
+              Choose what the portrait may observe. Permission is requested only after you select an option. The portrait forms in about 20 seconds, and denial never ends the experience.
             </p>
             <ul className="permission-list">
               <li><strong>Camera</strong><span>Movement landmarks and local motion features. No face recognition or raw video storage.</span></li>
@@ -633,9 +839,6 @@ export function Experience() {
                 </button>
                 <button className="demo-choice" type="button" onClick={() => chooseDemo("kinetic")}>
                   <strong>Kinetic</strong><span>Frequent gestures, faster rhythm, high variation.</span>
-                </button>
-                <button className="demo-choice" type="button" onClick={() => chooseDemo("contrast")}>
-                  <strong>Contrasting pair</strong><span>Two complete portraits, created through the same pipeline.</span>
                 </button>
               </div>
             ) : null}
@@ -669,9 +872,15 @@ export function Experience() {
               </div>
               <span className="session-time">{secondsLabel(totalDuration - sessionElapsed)}</span>
             </div>
-            <div className="session-status" aria-live="polite">
+            <div className="session-status" data-state={sessionStatusState} aria-live="polite">
               <span className="status-dot" />
-              {inputMode === "demo" ? `${demoProfile} signal profile` : inputMode === "movement" ? "movement only" : "movement + sound"}
+              <span>{sessionSensorLabel}</span>
+              <span className="signal-activity" aria-hidden="true">
+                <i style={{ "--signal-level": `${18 + Math.min(1, Math.max(0, signals.movement)) * 82}%` } as React.CSSProperties} />
+                {inputMode !== "movement" ? (
+                  <i style={{ "--signal-level": `${18 + Math.min(1, Math.max(0, signals.loudness)) * 82}%` } as React.CSSProperties} />
+                ) : null}
+              </span>
             </div>
           </section>
         ) : null}
@@ -735,10 +944,13 @@ export function Experience() {
 
       <InformationPanel
         open={infoOpen}
-        onClose={() => setInfoOpen(false)}
+        onClose={closeInformation}
         quality={quality}
-        onQualityChange={setQuality}
+        effectiveQuality={effectiveQuality}
+        onQualityChange={handleQualityChange}
         sensorStatus={sensorStatus}
+        soundStatus={soundStatus}
+        onSoundVolumeChange={setSoundVolume}
       />
 
       {debug ? (

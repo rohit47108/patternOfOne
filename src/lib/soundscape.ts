@@ -12,14 +12,17 @@ export type SoundscapeState =
 export interface SoundscapeStatus {
   state: SoundscapeState;
   muted: boolean;
+  volume: number;
   message?: string;
 }
 
 export interface SoundscapeOptions {
   muted?: boolean;
   volume?: number;
-  /** Mute preference is kept only in sessionStorage, never sent anywhere. */
+  /** Mute preference is kept only in localStorage, never sent anywhere. */
   muteStorageKey?: string | false;
+  /** Volume is a local browser preference and is never sent anywhere. */
+  volumeStorageKey?: string | false;
   onStatus?: (status: Readonly<SoundscapeStatus>) => void;
 }
 
@@ -60,6 +63,7 @@ function getAudioContextConstructor(): typeof AudioContext | undefined {
  */
 export class SoundscapeController {
   private readonly muteStorageKey: string | false;
+  private readonly volumeStorageKey: string | false;
   private readonly statusListeners = new Set<StatusListener>();
   private currentStatus: SoundscapeStatus;
   private parameters: ArtisticParameters = { ...NEUTRAL_PARAMS };
@@ -81,17 +85,23 @@ export class SoundscapeController {
   private texture: AudioBufferSourceNode | null = null;
   private scheduler: number | null = null;
   private nextPulseAt = 0;
+  private startPromise: Promise<boolean> | null = null;
 
   constructor(options: SoundscapeOptions = {}) {
     this.muteStorageKey =
       options.muteStorageKey === undefined
         ? "pattern-of-one:sound-muted"
         : options.muteStorageKey;
-    this.volume = clamp(options.volume ?? 0.72);
+    this.volumeStorageKey =
+      options.volumeStorageKey === undefined
+        ? "pattern-of-one:sound-volume"
+        : options.volumeStorageKey;
+    this.volume = this.readStoredVolume() ?? clamp(options.volume ?? 0.58);
     const storedMute = this.readStoredMute();
     this.currentStatus = {
       state: "idle",
       muted: storedMute ?? options.muted ?? false,
+      volume: this.volume,
       message: "Sound waits for a participant gesture.",
     };
     if (options.onStatus) this.statusListeners.add(options.onStatus);
@@ -117,6 +127,17 @@ export class SoundscapeController {
 
   /** Must be invoked from a user gesture; no AudioContext exists beforehand. */
   async start(): Promise<boolean> {
+    if (this.startPromise) return this.startPromise;
+    const pending = this.startInternal();
+    this.startPromise = pending;
+    try {
+      return await pending;
+    } finally {
+      if (this.startPromise === pending) this.startPromise = null;
+    }
+  }
+
+  private async startInternal(): Promise<boolean> {
     if (this.context) return this.resume();
 
     const AudioContextConstructor = getAudioContextConstructor();
@@ -142,6 +163,7 @@ export class SoundscapeController {
       if (typeof document !== "undefined") {
         document.addEventListener("visibilitychange", this.handleVisibility);
       }
+      context.addEventListener("statechange", this.handleContextStateChange);
       this.scheduler = window.setInterval(this.schedulePulse, 100);
       this.update(this.parameters);
       await context.resume();
@@ -191,7 +213,10 @@ export class SoundscapeController {
 
   setVolume(volume: number): void {
     this.volume = clamp(volume);
+    this.currentStatus = { ...this.currentStatus, volume: this.volume };
+    this.storeVolume(this.volume);
     this.applyMasterGain();
+    this.emitStatus();
   }
 
   update(parameters: ArtisticParameters): void {
@@ -221,25 +246,25 @@ export class SoundscapeController {
 
     this.smooth(
       this.toneAGain?.gain,
-      0.012 + params.continuity * 0.011 + params.silence * 0.014,
+      0.026 + params.continuity * 0.018 + params.silence * 0.017,
       now,
       0.7,
     );
     this.smooth(
       this.toneBGain?.gain,
-      0.004 + params.energy * 0.013 + params.density * 0.004,
+      0.009 + params.energy * 0.019 + params.density * 0.007,
       now,
       0.55,
     );
     this.smooth(
       this.memoryGain?.gain,
-      params.memory * (0.004 + params.illumination * 0.012),
+      params.memory * (0.009 + params.illumination * 0.017),
       now,
       1.15,
     );
     this.smooth(
       this.textureGain?.gain,
-      0.001 + params.density * 0.004 + params.volatility * 0.0035,
+      0.002 + params.density * 0.006 + params.volatility * 0.0045,
       now,
       0.75,
     );
@@ -258,13 +283,7 @@ export class SoundscapeController {
   }
 
   async stop(): Promise<void> {
-    if (this.scheduler !== null && typeof window !== "undefined") {
-      window.clearInterval(this.scheduler);
-    }
-    this.scheduler = null;
-    if (typeof document !== "undefined") {
-      document.removeEventListener("visibilitychange", this.handleVisibility);
-    }
+    this.detachLifecycle();
 
     const context = this.context;
     if (context && this.masterGain && context.state !== "closed") {
@@ -390,7 +409,7 @@ export class SoundscapeController {
     if (context.currentTime + 0.08 < this.nextPulseAt) return;
 
     const at = Math.max(context.currentTime + 0.015, this.nextPulseAt);
-    const peak = 0.0035 + params.energy * 0.011 + params.rhythm * 0.004;
+    const peak = 0.007 + params.energy * 0.017 + params.rhythm * 0.008;
     const release = 0.32 + params.continuity * 0.3;
     pulseGain.gain.cancelScheduledValues(at);
     pulseGain.gain.setValueAtTime(0.0001, at);
@@ -425,7 +444,11 @@ export class SoundscapeController {
         .then(() => {
           if (this.context === context) {
             this.applyMasterGain();
-            this.setStatus("ready", "Soundscape ready.");
+            const running = context.state === "running";
+            this.setStatus(
+              running ? "ready" : "suspended",
+              running ? "Soundscape ready." : "Tap the sound control to resume audio.",
+            );
           }
         })
         .catch(() => {
@@ -436,11 +459,22 @@ export class SoundscapeController {
     }
   };
 
+  private readonly handleContextStateChange = (): void => {
+    const context = this.context;
+    if (!context || context.state === "closed") return;
+    if (context.state === "running") {
+      this.applyMasterGain();
+      this.setStatus("ready", "Soundscape ready.");
+    } else if (!this.hidden) {
+      this.setStatus("suspended", "Tap the sound control to resume audio.");
+    }
+  };
+
   private applyMasterGain(): void {
     const context = this.context;
     const gain = this.masterGain?.gain;
     if (!context || !gain || context.state === "closed") return;
-    const target = this.isMuted || this.hidden ? 0 : this.volume * 0.56;
+    const target = this.isMuted || this.hidden ? 0 : this.volume * 0.68;
     const now = context.currentTime;
     gain.cancelScheduledValues(now);
     gain.setTargetAtTime(target, now, target === 0 ? 0.045 : 0.18);
@@ -458,8 +492,10 @@ export class SoundscapeController {
   }
 
   private async disposeContext(): Promise<void> {
+    this.detachLifecycle();
     const context = this.context;
     this.context = null;
+    context?.removeEventListener("statechange", this.handleContextStateChange);
 
     for (const source of [
       this.toneA,
@@ -521,7 +557,7 @@ export class SoundscapeController {
       return undefined;
     }
     try {
-      const stored = window.sessionStorage.getItem(this.muteStorageKey);
+      const stored = window.localStorage.getItem(this.muteStorageKey);
       return stored === null ? undefined : stored === "1";
     } catch {
       return undefined;
@@ -533,7 +569,38 @@ export class SoundscapeController {
       return;
     }
     try {
-      window.sessionStorage.setItem(this.muteStorageKey, muted ? "1" : "0");
+      window.localStorage.setItem(this.muteStorageKey, muted ? "1" : "0");
+    } catch {
+      // Storage can be unavailable in privacy modes; in-memory state still works.
+    }
+  }
+
+  private detachLifecycle(): void {
+    if (this.scheduler !== null && typeof window !== "undefined") {
+      window.clearInterval(this.scheduler);
+    }
+    this.scheduler = null;
+    if (typeof document !== "undefined") {
+      document.removeEventListener("visibilitychange", this.handleVisibility);
+    }
+  }
+
+  private readStoredVolume(): number | undefined {
+    if (!this.volumeStorageKey || typeof window === "undefined") return undefined;
+    try {
+      const stored = window.localStorage.getItem(this.volumeStorageKey);
+      if (stored === null) return undefined;
+      const parsed = Number(stored);
+      return Number.isFinite(parsed) ? clamp(parsed) : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private storeVolume(volume: number): void {
+    if (!this.volumeStorageKey || typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(this.volumeStorageKey, String(clamp(volume)));
     } catch {
       // Storage can be unavailable in privacy modes; in-memory state still works.
     }

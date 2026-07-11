@@ -20,14 +20,14 @@ The application is one immersive route with a finite sequence of states:
 | --- | --- |
 | Attract | A seeded Canvas 2D organism moves before any sensor permission is requested. Pointer or touch provides a subtle response. |
 | Consent | The participant chooses camera plus microphone, movement only, or a deterministic demo. |
-| Calibration | A 4.2-second visual calibration starts the selected input and establishes the first personal baseline. |
-| Guided session | Three 27-second prompts explore presence, memory, and gesture. The artwork reacts without showing raw metrics. |
-| Final formation | For about 4.8 seconds, recent behavior and persistent motifs are reconciled into a stable-but-living form. |
+| Calibration | A 2-second visual calibration starts the selected input and establishes the first personal baseline. Live timing begins after the permission request resolves. |
+| Guided session | Three 5-second prompts explore presence, memory, and gesture. The artwork reacts without showing raw metrics. |
+| Final formation | For 3 seconds, recent behavior and persistent motifs are reconciled into a stable-but-living form. |
 | Reveal | A deterministic title, three evidence-based observations, session timeline, replay, PNG export, and new-session controls appear. |
 | Compare | Two locally available portraits are shown with equal weight and a descriptive, non-ranking comparison. |
 | Reset | Media and sound resources stop, the portrait dissolves, and requested local records are cleared. |
 
-The standard guided portion lasts 81 seconds, excluding calibration and final formation. **Finish portrait** can end it early.
+The complete standard path reaches the reveal in about 20 seconds: 2 seconds of calibration, 15 seconds across three prompts, and 3 seconds of formation. **Finish portrait** can end it early.
 
 ## How it works
 
@@ -73,9 +73,9 @@ Camera features are sampled independently from rendering. The current controller
 
 The living form is rendered entirely with **Canvas 2D**, seeded randomness, pooled particle/trail structures, persistent filaments, pulse rings, and silence-shaped negative space. WebGL and Three.js are not used.
 
-Rendering quality can be set to **Auto**, **High**, **Balanced**, or **Low** in **About this work**. Auto starts from viewport and hardware concurrency, then steps down when measured frame rate falls. Device pixel ratio and particle counts are capped, compact screens use the lower tier, and hidden tabs pause rendering work.
+Rendering quality can be set to **Auto**, **High**, **Balanced**, or **Low** in **About this work**. The panel shows the effective tier. Auto starts from viewport and hardware concurrency, steps down after sustained low frame rate, and recovers after sustained headroom. Each tier has distinct particle and pixel-ratio caps on desktop and compact screens, and hidden tabs pause rendering work.
 
-The optional soundscape is synthesized with Web Audio after a user gesture. It starts off, has no copyrighted audio asset, and carries no information that is missing from the visual interface.
+The optional soundscape is synthesized with Web Audio after a user gesture. It starts off, exposes Starting/On/Off/Unavailable feedback, has a local volume control, and persists mute and volume preferences in this browser. It has no copyrighted audio asset and carries no information that is missing from the visual interface.
 
 ## Architecture
 
@@ -149,7 +149,6 @@ From the consent screen, choose:
 
 - **Measured:** low movement, longer pauses, and gradual changes.
 - **Kinetic:** frequent gestures, faster rhythm, and high variation.
-- **Contrasting pair:** generates measured and kinetic sessions with the normal pipeline, then opens comparison.
 
 The root route also accepts exact, deterministic demo query parameters:
 
@@ -159,7 +158,7 @@ http://localhost:3000/?demo=kinetic
 http://localhost:3000/?demo=contrast
 ~~~
 
-<code>?demo=measured</code> and <code>?demo=kinetic</code> begin calibration automatically with a fixed seed. <code>?demo=contrast</code> creates two complete 90-second synthetic records immediately, runs final formation, and opens comparison. These routes request neither camera nor microphone.
+<code>?demo=measured</code> and <code>?demo=kinetic</code> begin the same 20-second path with a fixed seed. <code>?demo=contrast</code> is a deterministic QA shortcut that creates two 17-second signal records, runs final formation, and opens comparison. It is intentionally absent from the public chooser so the normal demo does not jump past the experience. These routes request neither camera nor microphone.
 
 ### Diagnostics and QA controls
 
@@ -188,7 +187,7 @@ The visual-QA shortcut <code>?preview=STATE</code> accepts <code>attract</code>,
 
 ## Permissions
 
-No media permission is requested on initial load or when **Begin your portrait** is selected. A request occurs only after the participant selects an input mode.
+No media permission is requested on initial load or when **Begin your portrait** is selected. A request occurs only after the participant selects an input mode. Full mode uses one combined browser request containing both camera and microphone constraints; movement-only uses one camera request with audio disabled.
 
 | Choice | Camera | Microphone | Network model assets |
 | --- | --- | --- | --- |
@@ -198,7 +197,7 @@ No media permission is requested on initial load or when **Begin your portrait**
 
 The optional generated sound output uses an <code>AudioContext</code> after the sound control is activated; it does not add another device permission.
 
-If a device is denied or unavailable, the interface offers demo mode and can continue with whatever signals remain. Finishing a portrait, resetting, changing to demo mode, or unmounting the experience stops active tracks and releases analysis resources.
+If a device is denied or unavailable, the interface offers Retry, movement-only when appropriate, and demo mode. Timing pauses when no usable input exists instead of generating a neutral result. If one requested sensor remains available, the portrait can continue in a clearly marked degraded state. Cancel, finishing a portrait, resetting, changing to demo mode, or unmounting stops active tracks and releases analysis resources.
 
 ## Privacy and local data
 
@@ -212,6 +211,8 @@ If a device is denied or unavailable, the interface offers demo mode and can con
 
 To support replay and comparison, the browser may retain at most two compact **derived** records in <code>localStorage</code> under <code>pattern-of-one:sessions:v1</code>. Each contains a seed, selected input mode/profile, accent, up to 360 normalized parameter frames, motifs, title, observations, duration, and final artistic parameters. It contains no raw camera frame, audio sample, or transcript.
 
+Mute and ambient-volume preferences are also stored locally under <code>pattern-of-one:sound-muted</code> and <code>pattern-of-one:sound-volume</code>. They contain only the selected control values.
+
 **Create another** keeps the prior derived record so a second portrait can be compared. **Clear session** or **Clear both** removes the stored records and returns the work to its seed. PNG export is composed locally and downloaded directly by the browser.
 
 ## Browser support and graceful degradation
@@ -224,7 +225,7 @@ Current Chromium on desktop or mobile is the primary target and the configured a
 | Camera is denied or absent | Sound can still contribute when available; the interface offers deterministic demo mode. |
 | Microphone is denied or absent | The portrait continues from movement. |
 | No body, multiple bodies, or very low light | Calm guidance asks the participant to reposition, simplify the frame, or add light; available signals continue. |
-| Camera and microphone are unavailable | The participant can switch to demo; continuing without signals produces only neutral evolution. |
+| Camera and microphone are unavailable | Timing pauses while the participant retries, chooses movement-only, or switches to demo mode. |
 | Browser speech APIs are absent | No change: transcription is not used. |
 | WebGL is absent | No change: rendering uses Canvas 2D. |
 | Canvas 2D is absent | The surrounding interface remains, but the artwork and PNG export cannot function; Canvas 2D is a hard requirement. |
@@ -241,15 +242,14 @@ Current Chromium on desktop or mobile is the primary target and the configured a
 - **Export PNG** produces an 1800 × 1200 composition with the portrait, generated title, Pattern of One wordmark, and artistic-interpretation disclaimer.
 - **Create another** retains one prior derived record.
 - **Compare two** appears when two records are available and presents equal canvases, timelines, one observation per portrait, and a non-ranking difference summary.
-- The contrast demo is the quickest reliable route for a judging comparison.
 
 There is no cloud gallery, share URL, server-rendered export, WebM export, or remote sync.
 
 ## Testing
 
-The Vitest suite covers personal baselines and variance safeguards, mapping, event and motif memory, deterministic randomness, demo profiles, interpretation, session replay/compaction/storage helpers, media failure classification, movement-only permissions, and cleanup.
+The Vitest suite covers personal baselines and variance safeguards, mapping, event and motif memory, deterministic randomness, demo profiles, interpretation, session replay/compaction/storage helpers, combined media permissions, cancellation cleanup, sound lifecycle states, local sound preferences, and resource cleanup.
 
-<code>e2e/experience.spec.ts</code> covers the pre-permission attract/consent path, an accelerated measured session through reveal, contrasting-pair comparison, mocked movement-only media, denied-media recovery, the information/quality dialog, replay/create-another/clear behavior, reduced motion, PNG download, and control reachability without horizontal overflow at 390 × 844.
+<code>e2e/experience.spec.ts</code> covers the pre-permission attract/consent path, all three accelerated prompts through reveal, deterministic comparison, combined and movement-only media, cancellation and denied-media recovery, truthful sound feedback, the information/quality/volume controls, canvas buffer changes, replay/create-another/clear behavior, reduced motion, PNG download, and control reachability at all six required viewport sizes.
 
 Run the release checks from the repository root:
 
@@ -274,7 +274,7 @@ $env:PLAYWRIGHT_BASE_URL="https://your-preview-url"
 npm run test:e2e
 ~~~
 
-Automated mocks are useful for navigation and denial states, but they do not replace manual camera/microphone checks on the actual presentation machine. Before a live demo, verify full media, movement only, both deterministic profiles, contrast, sound, replay, PNG export, clear/reset, reduced motion, and track shutdown.
+Automated mocks are useful for navigation and denial states, but they do not replace manual camera/microphone or speaker checks on the actual presentation machine. Before a live demo, verify full media, movement only, both public deterministic profiles, sound at a comfortable level, replay, PNG export, clear/reset, reduced motion, and track shutdown.
 
 ## Deploying on Vercel
 
@@ -318,7 +318,7 @@ src/
   components/
     Experience.tsx         state machine and end-to-end experience controller
     PortraitCanvas.tsx     Canvas 2D renderer and PNG composition
-    InformationPanel.tsx   premise, privacy, limitations, and quality setting
+    InformationPanel.tsx   plain-language privacy, quality, and sound settings
     DebugPanel.tsx         query-gated diagnostics and QA controls
     SessionTimeline.tsx    derived session history
     ComparisonView.tsx     equal two-portrait comparison
@@ -332,6 +332,7 @@ src/
     random.ts              seeded randomness
     session.ts             recording, replay, local storage, and cleanup
     soundscape.ts          generated Web Audio layer
+    timing.ts              shared 20-second experience timing
     types.ts               shared contracts
 tests/                     Vitest unit and browser-API tests
 e2e/                       Playwright experience and viewport tests

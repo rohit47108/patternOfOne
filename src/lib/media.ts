@@ -243,7 +243,12 @@ export class MediaSensorController {
   }
 
   async start(mode: InputMode = "full"): Promise<MediaSensorStartResult> {
-    await this.stop();
+    // stop() clears the previous graph synchronously before awaiting an old
+    // context close. Create the new context during the consent gesture, then
+    // wait for teardown so Safari does not lose user activation.
+    const teardown = this.stop();
+    if (mode === "full") this.prepareAudioContext();
+    await teardown;
     const token = ++this.generation;
     this.currentMode = mode;
     this.latestSignals = freshNeutralSignals();
@@ -275,17 +280,14 @@ export class MediaSensorController {
         microphone: mode === "full" ? "unavailable" : "idle",
         pose: "fallback",
       });
+      await this.releaseUnusedAudioContext();
       this.emitSignals();
       return this.startResult(mode);
     }
 
-    // Creating the context before awaiting permissions preserves the consent
-    // click's user activation. Movement-only mode never reaches this branch.
-    if (mode === "full") this.prepareAudioContext();
-
-    const requests: Promise<void>[] = [this.openCamera(token)];
-    if (mode === "full") requests.push(this.openMicrophone(token));
-    await Promise.all(requests);
+    // One request produces one browser permission decision and one stream.
+    // Movement-only requests video; full mode requests video and audio together.
+    await this.openMedia(token, mode);
 
     if (token !== this.generation || !this.active) {
       return this.startResult(mode);
@@ -320,8 +322,11 @@ export class MediaSensorController {
     if (!this.audioContext) return false;
     try {
       await this.audioContext.resume();
-      return this.audioContext.state === "running";
+      const running = this.audioContext.state === "running";
+      this.updateStatus({ microphone: running ? "ready" : "suspended" });
+      return running;
     } catch {
+      this.updateStatus({ microphone: "suspended" });
       return false;
     }
   }
@@ -343,9 +348,12 @@ export class MediaSensorController {
     this.previousPose = null;
     this.poseFeatures = null;
     this.poseMissingSince = null;
+    this.lastPoseSeenAt = 0;
+    this.lastPoseInferenceAt = 0;
 
-    this.stopStream(this.cameraStream);
-    this.stopStream(this.microphoneStream);
+    for (const stream of new Set([this.cameraStream, this.microphoneStream])) {
+      this.stopStream(stream);
+    }
     this.cameraStream = null;
     this.microphoneStream = null;
 
@@ -362,7 +370,11 @@ export class MediaSensorController {
     this.analyser = null;
     this.audioSamples = null;
     this.audioStartedAt = 0;
+    this.noiseFloor = 0.006;
     this.noiseWarning = false;
+    this.previousLoudness = 0;
+    this.silenceStartedAt = null;
+    this.lastOnsetAt = -Infinity;
     const context = this.audioContext;
     this.audioContext = null;
     if (context && context.state !== "closed") {
@@ -376,10 +388,14 @@ export class MediaSensorController {
     this.motionCanvas = null;
     this.motionContext = null;
     this.previousLuminance = null;
+    this.lastSampleAt = 0;
+    this.motionMean = NEUTRAL_SIGNALS.movement;
+    this.stillnessStartedAt = null;
     this.lowLightSince = null;
     this.lowLightWarning = false;
     this.multiplePeopleWarning = false;
     this.onsetTimes = [];
+    this.latestSignals = freshNeutralSignals();
     this.updateStatus(idleStatus("Sensors stopped. Camera and microphone released."));
   }
 
@@ -495,7 +511,8 @@ export class MediaSensorController {
     };
   }
 
-  private async openCamera(token: number): Promise<void> {
+  private async openMedia(token: number, mode: InputMode): Promise<void> {
+    let acquiredStream: MediaStream | null = null;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
@@ -504,83 +521,110 @@ export class MediaSensorController {
           height: { ideal: 720 },
           frameRate: { ideal: 30, max: 30 },
         },
-        audio: false,
+        audio:
+          mode === "full"
+            ? {
+                autoGainControl: false,
+                echoCancellation: true,
+                noiseSuppression: true,
+                channelCount: 1,
+              }
+            : false,
       });
+      acquiredStream = stream;
       if (token !== this.generation || !this.active) {
         this.stopStream(stream);
         return;
       }
 
-      this.cameraStream = stream;
-      stream.getVideoTracks()[0]?.addEventListener("ended", () => {
-        if (!this.active || this.cameraStream !== stream) return;
-        this.cameraStream = null;
-        this.poseLandmarker?.close();
-        this.poseLandmarker = null;
-        this.previousLuminance = null;
+      const videoTrack = stream.getVideoTracks()[0];
+      const audioTrack = stream.getAudioTracks()[0];
+
+      if (videoTrack) {
+        this.cameraStream = stream;
+        videoTrack.addEventListener("ended", () => {
+          if (!this.active || this.cameraStream !== stream) return;
+          this.cameraStream = null;
+          this.poseLandmarker?.close();
+          this.poseLandmarker = null;
+          this.previousLuminance = null;
+          this.updateStatus({ camera: "unavailable", pose: "fallback" });
+        });
+        const video = this.ensureVideoElement();
+        this.connectVideo(video);
+        this.updateStatus({ camera: "ready" });
+      } else {
         this.updateStatus({ camera: "unavailable", pose: "fallback" });
-      });
-      const video = this.ensureVideoElement();
-      this.connectVideo(video);
-      this.updateStatus({ camera: "ready" });
-    } catch (error) {
-      if (token !== this.generation) return;
-      this.updateStatus({ camera: classifyMediaError(error) });
-    }
-  }
+      }
 
-  private async openMicrophone(token: number): Promise<void> {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: false,
-        audio: {
-          autoGainControl: false,
-          echoCancellation: true,
-          noiseSuppression: true,
-          channelCount: 1,
-        },
-      });
-      if (token !== this.generation || !this.active) {
-        this.stopStream(stream);
+      if (mode !== "full") {
+        this.updateStatus({ microphone: "idle" });
         return;
       }
 
-      if (!this.audioContext) {
-        this.stopStream(stream);
+      if (!audioTrack || !this.audioContext) {
+        audioTrack?.stop();
         this.updateStatus({ microphone: "unavailable" });
+        await this.releaseUnusedAudioContext();
         return;
       }
 
-      this.microphoneStream = stream;
-      stream.getAudioTracks()[0]?.addEventListener("ended", () => {
-        if (!this.active || this.microphoneStream !== stream) return;
-        this.microphoneStream = null;
+      try {
+        this.microphoneStream = stream;
+        audioTrack.addEventListener("ended", () => {
+          if (!this.active || this.microphoneStream !== stream) return;
+          this.microphoneStream = null;
+          this.audioSource?.disconnect();
+          this.analyser?.disconnect();
+          this.audioSource = null;
+          this.analyser = null;
+          this.audioSamples = null;
+          this.updateStatus({ microphone: "unavailable" });
+          void this.releaseUnusedAudioContext();
+        });
+        this.audioSource = this.audioContext.createMediaStreamSource(stream);
+        this.analyser = this.audioContext.createAnalyser();
+        this.analyser.fftSize = 1_024;
+        this.analyser.smoothingTimeConstant = 0.55;
+        this.audioSamples = new Float32Array(
+          new ArrayBuffer(this.analyser.fftSize * Float32Array.BYTES_PER_ELEMENT),
+        );
+        this.audioSource.connect(this.analyser);
+        this.audioStartedAt = Date.now();
+      } catch {
         this.audioSource?.disconnect();
         this.analyser?.disconnect();
         this.audioSource = null;
         this.analyser = null;
         this.audioSamples = null;
-        this.updateStatus({ microphone: "unavailable" });
-        void this.releaseUnusedAudioContext();
-      });
-      this.audioSource = this.audioContext.createMediaStreamSource(stream);
-      this.analyser = this.audioContext.createAnalyser();
-      this.analyser.fftSize = 1_024;
-      this.analyser.smoothingTimeConstant = 0.55;
-      this.audioSamples = new Float32Array(
-        new ArrayBuffer(this.analyser.fftSize * Float32Array.BYTES_PER_ELEMENT),
-      );
-      this.audioSource.connect(this.analyser);
-      this.audioStartedAt = Date.now();
+        this.microphoneStream = null;
+        audioTrack.stop();
+        this.updateStatus({ microphone: "error" });
+        await this.releaseUnusedAudioContext();
+        return;
+      }
+
       try {
         await this.audioContext.resume();
+        this.updateStatus({
+          microphone:
+            this.audioContext.state === "running" ? "ready" : "suspended",
+        });
       } catch {
-        // A later explicit gesture can retry through resumeAudio().
+        // The stream remains live so a later explicit Retry audio action can resume it.
+        this.updateStatus({ microphone: "suspended" });
       }
-      this.updateStatus({ microphone: "ready" });
     } catch (error) {
       if (token !== this.generation) return;
-      this.updateStatus({ microphone: classifyMediaError(error) });
+      this.stopStream(acquiredStream);
+      if (this.cameraStream === acquiredStream) this.cameraStream = null;
+      if (this.microphoneStream === acquiredStream) this.microphoneStream = null;
+      const deviceState = classifyMediaError(error);
+      this.updateStatus({
+        camera: deviceState,
+        microphone: mode === "full" ? deviceState : "idle",
+        pose: "fallback",
+      });
       await this.releaseUnusedAudioContext();
     }
   }

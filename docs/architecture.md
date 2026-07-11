@@ -56,7 +56,7 @@ attract -> consent -> calibration -> session -> forming -> reveal
 - **Attract:** an input-free seeded form responds only to pointer/touch. No media access occurs.
 - **Consent:** the user chooses full media, movement only, or demo. Camera/microphone purposes and exclusions are explicit.
 - **Calibration:** a 3-5 second sequence checks availability and establishes environmental and personal baselines through artwork changes, not a generic spinner.
-- **Session:** three timed prompts progress from presence to memory to gesture over roughly 75-120 seconds. Only the prompt, quiet progress, status, mute, and exit surround the canvas.
+- **Session:** three five-second prompts progress from presence to memory to gesture. With two-second calibration and three-second formation, the reveal arrives in about 20 seconds. Only the prompt, quiet progress, status, sound, and exit surround the canvas.
 - **Forming:** new prompts stop; early and late motifs are replayed and reconciled into a stable-but-living result.
 - **Reveal:** the portrait, deterministic title, three evidence-backed observations, timeline/replay, PNG export, and new-session action appear.
 - **Compare:** two local records receive equal visual weight and descriptive differences without scoring or categories.

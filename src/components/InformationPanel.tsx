@@ -1,22 +1,29 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import type { QualityTier, SensorStatus } from "@/src/lib/types";
+import type { SoundscapeStatus } from "@/src/lib/soundscape";
+import type { EffectiveQuality, QualityTier, SensorStatus } from "@/src/lib/types";
 
 interface InformationPanelProps {
   open: boolean;
   onClose: () => void;
   quality: QualityTier;
+  effectiveQuality: EffectiveQuality;
   onQualityChange: (quality: QualityTier) => void;
   sensorStatus: SensorStatus;
+  soundStatus: SoundscapeStatus;
+  onSoundVolumeChange: (volume: number) => void;
 }
 
 export function InformationPanel({
   open,
   onClose,
   quality,
+  effectiveQuality,
   onQualityChange,
   sensorStatus,
+  soundStatus,
+  onSoundVolumeChange,
 }: InformationPanelProps) {
   const closeRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLElement>(null);
@@ -30,7 +37,7 @@ export function InformationPanel({
       if (event.key !== "Tab") return;
       const focusable = Array.from(
         panelRef.current?.querySelectorAll<HTMLElement>(
-          "button:not([disabled]), select:not([disabled]), a[href], [tabindex]:not([tabindex='-1'])",
+          "button:not([disabled]), select:not([disabled]), input:not([disabled]), a[href], [tabindex]:not([tabindex='-1'])",
         ) ?? [],
       ).filter((element) => !element.hidden);
       if (focusable.length === 0) return;
@@ -64,74 +71,66 @@ export function InformationPanel({
         </header>
 
         <div className="info-intro">
-          <h2 id="about-title">A portrait made from change.</h2>
+          <h2 id="about-title">What changes the portrait.</h2>
           <p>
-            Traditional portraits capture appearance at a single moment. Pattern of One creates a living form from rhythm,
-            silence, gesture, repetition, and change. It is one computational interpretation of a temporary encounter—not a
-            diagnosis or definition of you.
+            Pattern of One responds to the rhythm of one short encounter. Movement, sound, and pauses alter the same living
+            form in real time. The result is artwork, not a reading of who you are.
           </p>
         </div>
 
         <div className="info-grid">
           <article>
-            <h3>What it observes</h3>
+            <h3>What changes it</h3>
             <p>
-              Movement intensity, reach, balance, proximity, stillness, sound level, vocal rhythm, variation, and pauses. Each
-              signal is compared with your own evolving baseline.
+              Broad movement, reach, balance, distance, stillness, sound level, rhythm, and pauses. The portrait responds to
+              changes during this session instead of comparing you with other people.
             </p>
           </article>
           <article>
-            <h3>What it never does</h3>
+            <h3>What stays here</h3>
             <p>
-              No face recognition, identity matching, emotion diagnosis, personality scoring, protected-trait inference, or
-              raw camera and microphone storage.
+              Camera and microphone features are processed in this tab. Raw video and audio are not uploaded or saved, and
+              media tracks stop when you cancel or reset. A small derived replay and your display settings can remain in this
+              browser until you choose Clear session. Demo mode requests neither device.
             </p>
           </article>
           <article>
-            <h3>How privacy works</h3>
+            <h3>What it means</h3>
             <p>
-              Camera landmarks and audio features are processed locally in this tab. Raw video and audio are not uploaded.
-              Media tracks stop on exit and reset. A lightweight derived replay can remain in this browser for comparison until
-              you clear the session; reset deletes it. Demo mode requires neither camera nor microphone.
-            </p>
-          </article>
-          <article>
-            <h3>How it is made</h3>
-            <p>
-              A deterministic TypeScript signal pipeline, adaptive personal baselines, local pose analysis with a motion
-              fallback, Canvas 2D rendering, and an optional Web Audio soundscape.
-            </p>
-          </article>
-          <article>
-            <h3>Limitations</h3>
-            <p>
-              Lighting, room noise, occlusion, assistive devices, camera position, and browser support can change the available
-              signals. The artwork makes no claim to objective perception.
-            </p>
-          </article>
-          <article>
-            <h3>Hackathon connection</h3>
-            <p>
-              Real-time computation is the medium: without participant input, adaptive memory, and live synthesis, the portrait
-              cannot exist.
+              It is an artistic interpretation of a temporary interaction. It does not recognize faces, identify people,
+              diagnose emotion, or score personality. Lighting, room noise, and browser support can affect the form.
             </p>
           </article>
         </div>
 
         <footer className="info-footer">
-          <label className="quality-field">
-            <span>Rendering quality</span>
-            <select value={quality} onChange={(event) => onQualityChange(event.target.value as QualityTier)}>
-              <option value="auto">Auto</option>
-              <option value="high">High</option>
-              <option value="balanced">Balanced</option>
-              <option value="low">Low</option>
-            </select>
+          <div className="settings-group">
+            <label className="quality-field">
+              <span>Rendering quality</span>
+              <select value={quality} onChange={(event) => onQualityChange(event.target.value as QualityTier)}>
+                <option value="auto">Auto</option>
+                <option value="high">High</option>
+                <option value="balanced">Balanced</option>
+                <option value="low">Low</option>
+              </select>
+            </label>
+            <p className="settings-readout" aria-live="polite">Currently using {effectiveQuality} quality.</p>
+          </div>
+          <label className="volume-field">
+            <span>Ambient volume</span>
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.05"
+              value={soundStatus.volume}
+              onChange={(event) => onSoundVolumeChange(Number(event.target.value))}
+            />
+            <span>{Math.round(soundStatus.volume * 100)}% · {soundStatus.state === "ready" && !soundStatus.muted && soundStatus.volume > 0.01 ? "on" : "off"}</span>
           </label>
           <p className="sensor-summary" aria-live="polite">
-            Camera {sensorStatus.camera} · Microphone {sensorStatus.microphone} · Pose {sensorStatus.pose}
+            Camera {sensorStatus.camera} · Microphone {sensorStatus.microphone} · Motion {sensorStatus.pose}
           </p>
-          <p>Original software and generative sound. Reference research and implementation notes are documented in the repository.</p>
         </footer>
       </section>
     </div>

@@ -107,7 +107,7 @@ export interface SessionRecord {
 
 export interface SensorStatus {
   camera: "idle" | "loading" | "ready" | "denied" | "unavailable" | "error";
-  microphone: "idle" | "loading" | "ready" | "denied" | "unavailable" | "error";
+  microphone: "idle" | "loading" | "ready" | "suspended" | "denied" | "unavailable" | "error";
   pose: "idle" | "loading" | "ready" | "fallback" | "error";
   message?: string;
 }
